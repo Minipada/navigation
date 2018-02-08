@@ -29,6 +29,7 @@ def publishOdom():
 
     odom = Odometry()
     odom.header.frame_id = odom_frame_id
+    odom.child_frame_id = base_frame_id
     odom.pose.pose = Pose(Point(0, 0, 0), Quaternion(*quat))
 
     rospy.loginfo("Publishing static odometry from \"%s\" to \"%s\"", odom_frame_id, base_frame_id)

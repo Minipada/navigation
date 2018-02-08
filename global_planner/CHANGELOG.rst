@@ -2,26 +2,6 @@
 Changelog for package global_planner
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-1.14.2 (2017-08-14)
--------------------
-
-1.14.1 (2017-08-07)
--------------------
-* Fix CMakeLists + package.xmls (`#548 <https://github.com/ros-planning/navigation/issues/548>`_)
-* Fix to increment 'cycle' in while loop (`#546 <https://github.com/ros-planning/navigation/issues/546>`_)
-* Fix to check index value before accessing to element of potential array (`#547 <https://github.com/ros-planning/navigation/issues/547>`_)
-* Set frame_id and stamp on Path message even if path is not found. (`#533 <https://github.com/ros-planning/navigation/issues/533>`_)
-* Contributors: Junya Hayashi, Martin Günther
-
-1.14.0 (2016-05-20)
--------------------
-
-1.13.1 (2015-10-29)
--------------------
-* Add missing angles dependecy
-* Fix for `#337 <https://github.com/ros-planning/navigation/issues/337>`_
-* Contributors: David V. Lu!!, Gary Servin
-
 1.13.0 (2015-03-17)
 -------------------
 * Fixing various memory freeing operations

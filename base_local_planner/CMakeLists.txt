@@ -5,20 +5,18 @@ find_package(catkin REQUIRED
         COMPONENTS
             angles
             cmake_modules
-            costmap_2d
+            roscpp
+            tf
+            message_generation
             dynamic_reconfigure
             geometry_msgs
             message_generation
             nav_core
             nav_msgs
             pcl_conversions
-            pcl_ros
+            costmap_2d
             pluginlib
-            roscpp
-            rospy
-            std_msgs
-            tf
-            voxel_grid
+            angles
         )
 
 find_package(Boost REQUIRED
@@ -26,16 +24,16 @@ find_package(Boost REQUIRED
         thread
         )
 
-find_package(Eigen3 REQUIRED)
+find_package(Eigen REQUIRED)
 find_package(PCL REQUIRED)
 remove_definitions(-DDISABLE_LIBUSB-1.0)
 include_directories(
     include
     ${catkin_INCLUDE_DIRS}
-    ${EIGEN3_INCLUDE_DIRS}
+    ${EIGEN_INCLUDE_DIRS}
     ${PCL_INCLUDE_DIRS}
 )
-add_definitions(${EIGEN3_DEFINITIONS})
+add_definitions(${EIGEN_DEFINITIONS})
 
 catkin_python_setup()
 
@@ -62,17 +60,17 @@ catkin_package(
         base_local_planner
         trajectory_planner_ros
     CATKIN_DEPENDS
-        angles
+        roscpp
+        dynamic_reconfigure
+        message_generation
+        tf
+        pluginlib
         costmap_2d
         dynamic_reconfigure
         geometry_msgs
         message_runtime
         nav_core
-        nav_msgs
-        pluginlib
-        roscpp
-        std_msgs
-        tf
+        angles
 )
 
 #uncomment for profiling
@@ -102,8 +100,8 @@ add_library(base_local_planner
 	src/twirling_cost_function.cpp
 	src/voxel_grid_model.cpp)
 add_dependencies(base_local_planner base_local_planner_gencfg)
-add_dependencies(base_local_planner base_local_planner_generate_messages_cpp)
-add_dependencies(base_local_planner nav_msgs_generate_messages_cpp)
+add_dependencies(base_local_planner base_local_planner_gencpp)
+add_dependencies(base_local_planner nav_msgs_gencpp)
 target_link_libraries(base_local_planner
     ${catkin_LIBRARIES}
     ${PCL_LIBRARIES}
@@ -114,7 +112,7 @@ target_link_libraries(base_local_planner
 add_library(trajectory_planner_ros
 	src/trajectory_planner.cpp
 	src/trajectory_planner_ros.cpp)
-add_dependencies(trajectory_planner_ros ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+add_dependencies(trajectory_planner_ros nav_msgs_gencpp)
 target_link_libraries(trajectory_planner_ros
      base_local_planner)
 
@@ -150,6 +148,7 @@ if(CATKIN_ENABLE_TESTING)
   target_link_libraries(base_local_planner_utest
       base_local_planner trajectory_planner_ros
       )
+
 
   catkin_add_gtest(line_iterator
       test/line_iterator_test.cpp)

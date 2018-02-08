@@ -31,10 +31,10 @@
 // Signal handling
 #include <signal.h>
 
-#include "amcl/map/map.h"
-#include "amcl/pf/pf.h"
-#include "amcl/sensors/amcl_odom.h"
-#include "amcl/sensors/amcl_laser.h"
+#include "map/map.h"
+#include "pf/pf.h"
+#include "sensors/amcl_odom.h"
+#include "sensors/amcl_laser.h"
 
 #include "ros/assert.h"
 
@@ -49,6 +49,7 @@
 #include "nav_msgs/GetMap.h"
 #include "nav_msgs/SetMap.h"
 #include "std_srvs/Empty.h"
+#include <std_srvs/SetBool.h>
 
 // For transform support
 #include "tf/transform_broadcaster.h"
@@ -60,11 +61,6 @@
 // Dynamic_reconfigure
 #include "dynamic_reconfigure/server.h"
 #include "amcl/AMCLConfig.h"
-
-// Allows AMCL to run from bag file
-#include <rosbag/bag.h>
-#include <rosbag/view.h>
-#include <boost/foreach.hpp>
 
 #define NEW_UNIFORM_SAMPLING 1
 
@@ -113,24 +109,12 @@ class AmclNode
     AmclNode();
     ~AmclNode();
 
-    /**
-     * @brief Uses TF and LaserScan messages from bag file to drive AMCL instead
-     */
-    void runFromBag(const std::string &in_bag_fn);
-
     int process();
     void savePoseToServer();
 
   private:
     tf::TransformBroadcaster* tfb_;
-
-    // Use a child class to get access to tf2::Buffer class inside of tf_
-    struct TransformListenerWrapper : public tf::TransformListener
-    {
-      inline tf2_ros::Buffer &getBuffer() {return tf2_buffer_;}
-    };
-
-    TransformListenerWrapper* tf_;
+    tf::TransformListener* tf_;
 
     bool sent_first_transform_;
 
@@ -150,6 +134,8 @@ class AmclNode
                                     std_srvs::Empty::Response& res);
     bool setMapCallback(nav_msgs::SetMap::Request& req,
                         nav_msgs::SetMap::Response& res);
+    bool setActiveSrvCb(std_srvs::SetBool::Request &req,
+                      std_srvs::SetBool::Response &res);
 
     void laserReceived(const sensor_msgs::LaserScanConstPtr& laser_scan);
     void initialPoseReceived(const geometry_msgs::PoseWithCovarianceStampedConstPtr& msg);
@@ -215,9 +201,6 @@ class AmclNode
     ros::Duration cloud_pub_interval;
     ros::Time last_cloud_pub_time;
 
-    // For slowing play-back when reading directly from a bag file
-    ros::WallDuration bag_scan_period_;
-
     void requestMap();
 
     // Helper to get odometric pose from transform system
@@ -238,6 +221,9 @@ class AmclNode
     ros::ServiceServer set_map_srv_;
     ros::Subscriber initial_pose_sub_old_;
     ros::Subscriber map_sub_;
+
+    ros::ServiceServer disable_srv_;
+    bool is_active_;
 
     amcl_hyp_t* initial_pose_hyp_;
     bool first_map_received_;
@@ -261,6 +247,7 @@ class AmclNode
     double init_cov_[3];
     laser_model_t laser_model_type_;
     bool tf_broadcast_;
+
 
     void reconfigureCB(amcl::AMCLConfig &config, uint32_t level);
 
@@ -294,15 +281,7 @@ main(int argc, char** argv)
   // Make our node available to sigintHandler
   amcl_node_ptr.reset(new AmclNode());
 
-  if (argc == 1)
-  {
-    // run using ROS input
-    ros::spin();
-  }
-  else if ((argc == 3) && (std::string(argv[1]) == "--run-from-bag"))
-  {
-    amcl_node_ptr->runFromBag(argv[2]);
-  }
+  ros::spin();
 
   // Without this, our boost locks are not shut down nicely
   amcl_node_ptr.reset();
@@ -320,6 +299,7 @@ AmclNode::AmclNode() :
         odom_(NULL),
         laser_(NULL),
 	      private_nh_("~"),
+        is_active_(true),
         initial_pose_hyp_(NULL),
         first_map_received_(false),
         first_reconfigure_call_(true)
@@ -407,17 +387,13 @@ AmclNode::AmclNode() :
 
   transform_tolerance_.fromSec(tmp_tol);
 
-  {
-    double bag_scan_period;
-    private_nh_.param("bag_scan_period", bag_scan_period, -1.0);
-    bag_scan_period_.fromSec(bag_scan_period);
-  }
-
   updatePoseFromServer();
 
   cloud_pub_interval.fromSec(1.0);
   tfb_ = new tf::TransformBroadcaster();
-  tf_ = new TransformListenerWrapper();
+  tf_ = new tf::TransformListener();
+
+  disable_srv_ = nh_.advertiseService("set_amcl_active", &AmclNode::setActiveSrvCb, this);
 
   pose_pub_ = nh_.advertise<geometry_msgs::PoseWithCovarianceStamped>("amcl_pose", 2, true);
   particlecloud_pub_ = nh_.advertise<geometry_msgs::PoseArray>("particlecloud", 2, true);
@@ -599,94 +575,6 @@ void AmclNode::reconfigureCB(AMCLConfig &config, uint32_t level)
   initial_pose_sub_ = nh_.subscribe("initialpose", 2, &AmclNode::initialPoseReceived, this);
 }
 
-
-void AmclNode::runFromBag(const std::string &in_bag_fn)
-{
-  rosbag::Bag bag;
-  bag.open(in_bag_fn, rosbag::bagmode::Read);
-  std::vector<std::string> topics;
-  topics.push_back(std::string("tf"));
-  std::string scan_topic_name = "base_scan"; // TODO determine what topic this actually is from ROS
-  topics.push_back(scan_topic_name);
-  rosbag::View view(bag, rosbag::TopicQuery(topics));
-
-  ros::Publisher laser_pub = nh_.advertise<sensor_msgs::LaserScan>(scan_topic_name, 100);
-  ros::Publisher tf_pub = nh_.advertise<tf2_msgs::TFMessage>("/tf", 100);
-
-  // Sleep for a second to let all subscribers connect
-  ros::WallDuration(1.0).sleep();
-
-  ros::WallTime start(ros::WallTime::now());
-
-  // Wait for map
-  while (ros::ok())
-  {
-    {
-      boost::recursive_mutex::scoped_lock cfl(configuration_mutex_);
-      if (map_)
-      {
-        ROS_INFO("Map is ready");
-        break;
-      }
-    }
-    ROS_INFO("Waiting for map...");
-    ros::getGlobalCallbackQueue()->callAvailable(ros::WallDuration(1.0));
-  }
-
-  BOOST_FOREACH(rosbag::MessageInstance const msg, view)
-  {
-    if (!ros::ok())
-    {
-      break;
-    }
-
-    // Process any ros messages or callbacks at this point
-    ros::getGlobalCallbackQueue()->callAvailable(ros::WallDuration());
-
-    tf2_msgs::TFMessage::ConstPtr tf_msg = msg.instantiate<tf2_msgs::TFMessage>();
-    if (tf_msg != NULL)
-    {
-      tf_pub.publish(msg);
-      for (size_t ii=0; ii<tf_msg->transforms.size(); ++ii)
-      {
-        tf_->getBuffer().setTransform(tf_msg->transforms[ii], "rosbag_authority");
-      }
-      continue;
-    }
-
-    sensor_msgs::LaserScan::ConstPtr base_scan = msg.instantiate<sensor_msgs::LaserScan>();
-    if (base_scan != NULL)
-    {
-      laser_pub.publish(msg);
-      laser_scan_filter_->add(base_scan);
-      if (bag_scan_period_ > ros::WallDuration(0))
-      {
-        bag_scan_period_.sleep();
-      }
-      continue;
-    }
-
-    ROS_WARN_STREAM("Unsupported message type" << msg.getTopic());
-  }
-
-  bag.close();
-
-  double runtime = (ros::WallTime::now() - start).toSec();
-  ROS_INFO("Bag complete, took %.1f seconds to process, shutting down", runtime);
-
-  const geometry_msgs::Quaternion & q(last_published_pose.pose.pose.orientation);
-  double yaw, pitch, roll;
-  tf::Matrix3x3(tf::Quaternion(q.x, q.y, q.z, q.w)).getEulerYPR(yaw,pitch,roll);
-  ROS_INFO("Final location %.3f, %.3f, %.3f with stamp=%f",
-            last_published_pose.pose.pose.position.x,
-            last_published_pose.pose.pose.position.y,
-            yaw, last_published_pose.header.stamp.toSec()
-            );
-
-  ros::shutdown();
-}
-
-
 void AmclNode::savePoseToServer()
 {
   // We need to apply the last transform to the latest odom pose to get
@@ -802,11 +690,6 @@ AmclNode::handleMapMessage(const nav_msgs::OccupancyGrid& msg)
            msg.info.width,
            msg.info.height,
            msg.info.resolution);
-  
-  if(msg.header.frame_id != global_frame_id_)
-    ROS_WARN("Frame_id of map received:'%s' doesn't match global_frame_id:'%s;'. This could cause issues with reading published topics",
-             msg.header.frame_id.c_str(),
-             global_frame_id_.c_str());
 
   freeMapDependentMemory();
   // Clear queued laser objects because they hold pointers to the existing
@@ -1040,10 +923,21 @@ AmclNode::setMapCallback(nav_msgs::SetMap::Request& req,
   return true;
 }
 
+bool AmclNode::setActiveSrvCb(std_srvs::SetBool::Request &req, std_srvs::SetBool::Response &res)
+{
+  is_active_ = req.data;
+  return true;
+}
+
 void
 AmclNode::laserReceived(const sensor_msgs::LaserScanConstPtr& laser_scan)
 {
+  if (!is_active_) {
+    return;
+  }
+
   last_laser_received_ts_ = ros::Time::now();
+
   if( map_ == NULL ) {
     return;
   }
@@ -1263,11 +1157,6 @@ AmclNode::laserReceived(const sensor_msgs::LaserScanConstPtr& laser_scan)
 
   if(resampled || force_publication)
   {
-    if (!resampled)
-    {
-	    // re-compute the cluster statistics
-	    pf_cluster_stats(pf_, pf_->sets);
-    }
     // Read out the current hypotheses
     double max_weight = 0.0;
     int max_weight_hyp = -1;
@@ -1459,14 +1348,9 @@ AmclNode::handleInitialPoseMessage(const geometry_msgs::PoseWithCovarianceStampe
   tf::StampedTransform tx_odom;
   try
   {
-    ros::Time now = ros::Time::now();
-    // wait a little for the latest tf to become available
-    tf_->waitForTransform(base_frame_id_, msg.header.stamp,
-                         base_frame_id_, now,
-                         odom_frame_id_, ros::Duration(0.5));
-    tf_->lookupTransform(base_frame_id_, msg.header.stamp,
-                         base_frame_id_, now,
-                         odom_frame_id_, tx_odom);
+    tf_->lookupTransform(base_frame_id_, ros::Time::now(),
+                         base_frame_id_, msg.header.stamp,
+                         global_frame_id_, tx_odom);
   }
   catch(tf::TransformException e)
   {
@@ -1481,7 +1365,7 @@ AmclNode::handleInitialPoseMessage(const geometry_msgs::PoseWithCovarianceStampe
 
   tf::Pose pose_old, pose_new;
   tf::poseMsgToTF(msg.pose.pose, pose_old);
-  pose_new = pose_old * tx_odom;
+  pose_new = tx_odom.inverse() * pose_old;
 
   // Transform into the global frame
 
